@@ -15,6 +15,9 @@ April 23, 2013 - JOSH changed to do a slightly different way--decision tree.
 April 28, 2013 - JOSH changes how AFEs are called. Just requires two FEs that
     are non-overlapping
 April 29, 2013 - JOSH copied over from IDAltExonPatterns5.py and uploaded to git
+April 29, 2013 - JOSH changed how AFEs are called again. Now called a FE as an
+    exon of form [txtStart,ss5] that doesn't overlap with any other exons except
+    possibly itself, even if that's in another txt
 """
 import sys, common, csv, numpy, collections
 from pyx import *
@@ -259,27 +262,35 @@ def extendDownstream(FEIndexes,ss5):
 def getFirstExons(group,patterns):
     """Will return a list of the First Exons of the txts in groups as index in
     patterns. EDIT: will attempt to extend exons to encompass all overlapping
-    FEs into a single FE"""
+    FEs into a single FE. Double EDIT: Will only do first exons that are alone--
+    they do not overlap with anything but themselves."""
+    patterns=txtPattern(patterns)#NOTE This isn't really a good instance of txtPatterns class as it's entries are probably not tuples, but the .prev function is handy.
+    
     FEIndexes=[]#will keep track of the indexes of the first exon, i.e.
     #[[0,4],[5,6],[5,7]] might be the pattern for a gene with an alt 5'SS and
     #2 AFEs
-    for ii in range(len(group)):
-        for jj in range(len(patterns)):
+    k=len(group)
+    for ii in range(k):
+        for jj in range(len(patterns)-1):#prevents range error for j+1 later
             if patterns[jj][ii]=='txtStart':
-                FEIndexes.append([jj])
-            elif patterns[jj][ii]=='ss5':
-                FEIndexes[-1].append(jj)
-                break
+                if patterns[jj+1][ii]=='ss5':
+                    #then we've found an first exon that doesn't have anything between it. But do things overlap at the bounds?
+                    if (patterns[jj].count('txtStart')+patterns[jj].count(0)==k) and (patterns[jj+1].count('ss5')+patterns[jj+1].count(0)==k) and ((jj,jj+1) not in FEIndexes):
+                        
+                        #now make sure it's not a retained intron
+                        RI=0
+                        for kk in range(k):
+                            if kk!=ii:
+                                if patterns.prev(jj,kk) in ['ss5',0]:
+                                    pass
+                                else:
+                                    RI=1
+                                    break
+                        if RI==0:
+                            FEIndexes.append((jj,jj+1))
+                break#no need to keep looping for jj
     
-    assert len(FEIndexes)==len(group), 'A txt was lost or generated.'
-    FEIndexesOverlap=[]
-    for ii in range(len(FEIndexes)):
-        txtStartOverlap=extendUpstream(FEIndexes,FEIndexes[ii][0])
-        ss5Overlap=extendDownstream(FEIndexes,FEIndexes[ii][1])
-        if [txtStartOverlap,ss5Overlap] not in FEIndexesOverlap:
-            FEIndexesOverlap.append((txtStartOverlap,ss5Overlap))
-        
-    return FEIndexesOverlap
+    return FEIndexes
 
 def nonOverlappingAndUpstream(FEs_i,FEs_j):
     """Will figure out with these two tuples are non-overlapping and FEs_i is
@@ -289,22 +300,15 @@ def nonOverlappingAndUpstream(FEs_i,FEs_j):
     else:
         return 0
 
-def getFEsWithStarts(cdsStarts,patterns):
+def getFEsWithStarts(cdsStarts,FEIndexes):
     """Will return a list of all non-redundant first exons with a start codon"""
     a=[]
-    for ii in range(len(cdsStarts)):
-        for jj in range(len(patterns)):
-            tuple=[]
-            if patterns[jj][ii]=='txtStart':
-                tuple.append(jj)
-                for kk in range(jj+1,len(patterns)):
-                    if patterns[kk][ii]=='ss5':
-                        if cdsStarts[ii]<=kk:
-                            if tuple not in a:
-                                a.append(tuple+[kk])
-                                break
-                        else:
-                            break
+    for FE in FEIndexes:
+        txtStart=FE[0]
+        for cdsStart in cdsStarts:
+            if cdsStart==txtStart:
+                #The only way the cdsStart is the same as the txtStart is if the txt has coding sequence that includes the exon. Since FEs are chosen to be non-overlapping except with themselves, this means that txt must be the txt with that exon as a FE
+                a.append(FE)
                 break
     return a
 
@@ -323,10 +327,12 @@ def countClasses(groups,annots):
         FEs=getFirstExons(group,patterns)
         allDone['AFE']=dict((str(k),1) for k in FEs[:-1])
         done['AFE']=dict((str(k),1) for k in FEs[:-1])
-        #This does not count the number of AFEs, but rather counts the pairs. One pair is one event, not two exons. This is done to be similar to the other alternative events.
+        #This does not count the number of AFEs, but rather counts as n-1. The number of Alternatives. This is done to be similar to the other alternative events.
         
-        FEStarts=getFEsWithStarts(cdsStarts,patterns)
+        FEStarts=getFEsWithStarts(cdsStarts,FEs)
         done['AFEStart']=dict((str(k),1) for k in FEStarts)
+        if done['AFEStart']!={}:
+            print group, done['AFEStart']
         
         for i,j in [(i,j) for i in range(len(group)) for j in range(len(group)) if i!=j]:
             txti,txtj=group[i],group[j]
