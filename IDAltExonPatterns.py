@@ -14,6 +14,7 @@ April 21, 2013 - JOSH decided to go a different route. Rather than make a txt
 April 23, 2013 - JOSH changed to do a slightly different way--decision tree.
 April 28, 2013 - JOSH changes how AFEs are called. Just requires two FEs that
     are non-overlapping
+April 29, 2013 - JOSH copied over from IDAltExonPatterns5.py and uploaded to git
 """
 import sys, common, csv, numpy, collections
 from pyx import *
@@ -237,19 +238,48 @@ def getcdsStartIndex(group,positions,annots):
                     break
     return a
 
+def extendUpstream(FEIndexes,txtStart):
+    """Given FEIndexes, which is a list of lists of [txtStart,ss5] positions and
+    txtStart, will find the leftmost boundary of all overlapping tuples"""
+    for tuple in FEIndexes:
+        if tuple[1]>=txtStart:
+            if tuple[0]<txtStart:
+                return extendUpstream(FEIndexes,tuple[0])
+    return txtStart
+
+def extendDownstream(FEIndexes,ss5):
+    """Given FEIndexes, which is a list of lists of [txtStart,ss5] positions and
+    ss5, will find the rightmost boundary of all overlapping tuples"""
+    for tuple in FEIndexes:
+        if tuple[0]<ss5:
+            if tuple[1]>ss5:
+                return extendDownstream(FEIndexes,tuple[1])
+    return ss5
+
 def getFirstExons(group,patterns):
     """Will return a list of the First Exons of the txts in groups as index in
-    patterns"""
-    a=[]
+    patterns. EDIT: will attempt to extend exons to encompass all overlapping
+    FEs into a single FE"""
+    FEIndexes=[]#will keep track of the indexes of the first exon, i.e.
+    #[[0,4],[5,6],[5,7]] might be the pattern for a gene with an alt 5'SS and
+    #2 AFEs
     for ii in range(len(group)):
-        txt=group[ii]
         for jj in range(len(patterns)):
             if patterns[jj][ii]=='txtStart':
-                a.append([jj])
+                FEIndexes.append([jj])
             elif patterns[jj][ii]=='ss5':
-                a[-1].append(jj)
+                FEIndexes[-1].append(jj)
                 break
-    return a
+    
+    assert len(FEIndexes)==len(group), 'A txt was lost or generated.'
+    FEIndexesOverlap=[]
+    for ii in range(len(FEIndexes)):
+        txtStartOverlap=extendUpstream(FEIndexes,FEIndexes[ii][0])
+        ss5Overlap=extendDownstream(FEIndexes,FEIndexes[ii][1])
+        if [txtStartOverlap,ss5Overlap] not in FEIndexesOverlap:
+            FEIndexesOverlap.append((txtStartOverlap,ss5Overlap))
+        
+    return FEIndexesOverlap
 
 def nonOverlappingAndUpstream(FEs_i,FEs_j):
     """Will figure out with these two tuples are non-overlapping and FEs_i is
@@ -258,6 +288,25 @@ def nonOverlappingAndUpstream(FEs_i,FEs_j):
         return 1
     else:
         return 0
+
+def getFEsWithStarts(cdsStarts,patterns):
+    """Will return a list of all non-redundant first exons with a start codon"""
+    a=[]
+    for ii in range(len(cdsStarts)):
+        for jj in range(len(patterns)):
+            tuple=[]
+            if patterns[jj][ii]=='txtStart':
+                tuple.append(jj)
+                for kk in range(jj+1,len(patterns)):
+                    if patterns[kk][ii]=='ss5':
+                        if cdsStarts[ii]<=kk:
+                            if tuple not in a:
+                                a.append(tuple+[kk])
+                                break
+                        else:
+                            break
+                break
+    return a
 
 def countClasses(groups,annots):
     """groups is a list of lists with txt IDs, whose annotation information is
@@ -270,28 +319,22 @@ def countClasses(groups,annots):
         done=collections.defaultdict(dict)#will need to keep track so don't count the same event twice
         allDone=collections.defaultdict(dict)#will be used to keep track of all alternative events, whether TL affecting or not
         cdsStarts=getcdsStartIndex(group,positions,annots)
+        
         FEs=getFirstExons(group,patterns)
+        allDone['AFE']=dict((str(k),1) for k in FEs[:-1])
+        done['AFE']=dict((str(k),1) for k in FEs[:-1])
+        #This does not count the number of AFEs, but rather counts the pairs. One pair is one event, not two exons. This is done to be similar to the other alternative events.
+        
+        FEStarts=getFEsWithStarts(cdsStarts,patterns)
+        done['AFEStart']=dict((str(k),1) for k in FEStarts)
+        
         for i,j in [(i,j) for i in range(len(group)) for j in range(len(group)) if i!=j]:
             txti,txtj=group[i],group[j]
             patternij=txtPattern([(entry[i],entry[j]) for entry in patterns])
             #cdsStarts=[patternij.index(entry) for entry in patternij if 'cdsStart' in entry]
             cdsStartsij=(cdsStarts[i],cdsStarts[j])
             
-            FEs_i,FEs_j=FEs[i],FEs[j]
-            AFE=nonOverlappingAndUpstream(FEs_i,FEs_j)
-            
-            #Then it's an Alternative First Exon Pattern. Let's ID where the cdsStarts lie in relation.
-            if AFE:
-                if cdsStartsij[0]>=FEs_i[0] and cdsStartsij[1]>=FEs_j[0]:#cdsStart may be txtStart as it rounds upstream on the sense strand
-                    allDone['AFE'][str(FEs_i)+str(FEs_j)]=1
-                    done['AFE'][str(FEs_i)+str(FEs_j)]=1#example uc009elk.1 uc009elj.1
-                    if cdsStartsij[0]==FEs_i[0] and cdsStartsij[1]==FEs_j[0]:
-                        done['AFEStart2'][str(FEs_i)+str(FEs_j)]=1#example uc007qma.1 uc007qmb.1 in mm9, but changed in mm10
-                    elif cdsStartsij[0]>FEs_i[0] or cdsStartsij[1]>FEs_j[0]:
-                        done['AFEStart1'][str(FEs_i)+str(FEs_j)]=1#example uc009elk.1 uc009elj.1
-            
             for ii,event in patternij.iterate():#thus begins the decision tree
-                #if min(cdsStarts)>=ii:
                 if event==('ss5','ss5'):
                     jj,nextevent=patternij.next(ii)
                     if nextevent==('ss3',0):
@@ -405,11 +448,14 @@ def countClasses(groups,annots):
     
     for key in metaDone:
         if key in metaAllDone:
-            print key,'\t%.4f'%(metaDone[key]/float(sum(metaDone.values()))),'\t%.4f'%(metaAllDone[key]/float(sum(metaAllDone.values())))
+            #print key,'\t%.4f'%(metaDone[key]/float(sum(metaDone.values()))),'\t%.4f'%(metaAllDone[key]/float(sum(metaAllDone.values())))
+            print key+'\t'+str(metaDone[key])+'\t'+str(metaAllDone[key])
         else:
-            print key,'\t%.4f'%(metaDone[key]/float(sum(metaDone.values())))
+            #print key,'\t%.4f'%(metaDone[key]/float(sum(metaDone.values())))
+            print key+'\t'+str(metaDone[key])
     print sum(metaDone.values())
     print sum(metaAllDone.values())
+    sys.exit()
     return metaDone
 
 def mkTable(classCounts,outPrefix):
@@ -618,9 +664,8 @@ def mkTable(classCounts,outPrefix):
     c.text(hSpacing/3.,-ii*vSpacing-vSpacing/2.,'Alternative First Exon ('+str(totals['AFE'])+')',titleAlign)
     #breakdown by start sites and do counts
     c.text(diagramWidth+3*hSpacing/4.,-ii*vSpacing-vSpacing/2.,
-           'Start Site Downstream: '+str(classCounts['AFE'])+'\n\nStart Site in Both Alt Exons: '+
-           str(classCounts['AFEStart2'])+'\n\nStart Site in One Alt Exon: '+
-           str(classCounts['AFEStart1']),breakdownAlign)
+           'Start Site Downstream: '+str(classCounts['AFE'])+'\n\nStart Site in Alt Exon: '+
+           str(classCounts['AFEStart']),breakdownAlign)
     #draw a left exon
     c.stroke(path.rect(-hSpacing/2.+hSpacing, -ii*vSpacing-5*vSpacing/8., exonWidth, exonHeight),
            lineWidth)
@@ -883,14 +928,14 @@ def mkTable(classCounts,outPrefix):
 def main(args):
     annots,outPrefix=args[0:]
     
-    #annots=parseAnnots(annots)
+    annots=parseAnnots(annots)
     
-    #groups=getTxtsThatShareSS(annots)
+    groups=getTxtsThatShareSS(annots)
     
-    #groups=[entry for entry in groups if len(entry)>1]#restricts to only those txt groups with >1 txt
+    groups=[entry for entry in groups if len(entry)>1]#restricts to only those txt groups with >1 txt
     
-    #classCounts=countClasses(groups,annots)
-    #common.rePickle(classCounts,outPrefix+'.p')
+    classCounts=countClasses(groups,annots)
+    common.rePickle(classCounts,outPrefix+'.p')
     classCounts=common.unPickle(outPrefix+'.p')
     mkTable(classCounts,outPrefix)
 
